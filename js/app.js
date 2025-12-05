@@ -1,10 +1,11 @@
 // js/app.js
 // Простая клиентская симуляция торгов для GitHub Pages (localStorage)
+// Изменения: удалён stop-loss; добавлена минимальная интеграция с Telegram Web App
 
 // --- Настройки начальные ---
 const DEFAULT_BALANCE = 1000;
 const COINS = {
-  BTC: { price: 0.023, name: "BTC", volatility: 0.002 }, // условные низкие цены (для "дешёвых" монет)
+  BTC: { price: 0.023, name: "BTC", volatility: 0.002 },
   ETH: { price: 0.0065, name: "ETH", volatility: 0.003 },
   XRP: { price: 0.0008, name: "XRP", volatility: 0.004 }
 };
@@ -15,7 +16,7 @@ const STORAGE_KEYS = {
   BALANCE: 'tg_trade_balance_v1',
   HISTORY: 'tg_trade_history_v1',
   RANKING: 'tg_trade_ranking_v1',
-  STATE: 'tg_trade_state_v1' // active position, etc
+  STATE: 'tg_trade_state_v1'
 };
 
 let state = {
@@ -23,8 +24,8 @@ let state = {
   free: DEFAULT_BALANCE,
   history: [],
   ranking: [],
-  prices: {}, // массивы цен
-  active: null // активная позиция или null
+  prices: {},
+  active: null
 };
 
 // --- UI элементы ---
@@ -41,7 +42,6 @@ const marginInput = document.getElementById('marginInput');
 const tradeCoinSel = document.getElementById('tradeCoin');
 const leverageSel = document.getElementById('leverage');
 const sideSel = document.getElementById('side');
-const stopInput = document.getElementById('stopInput');
 const takeInput = document.getElementById('takeInput');
 const openBtn = document.getElementById('openBtn');
 const closeBtn = document.getElementById('closeBtn');
@@ -108,7 +108,6 @@ function tickPrices(){
   Object.keys(COINS).forEach(key=>{
     const vol = COINS[key].volatility;
     const last = state.prices[key][state.prices[key].length-1];
-    // случайный блуждающий процесс с небольшим трендом
     const change = (Math.random() - 0.5) * vol * (1 + (Math.random()-0.5)*0.5);
     let next = Math.max(0.000001, last * (1 + change));
     state.prices[key].push(next);
@@ -135,7 +134,6 @@ function updateMiniCharts(){
     const ch = miniCharts[key];
     ch.data.datasets[0].data = state.prices[key];
     ch.update('none');
-    // update price text
     const last = state.prices[key][state.prices[key].length-1];
     priceElem(key).textContent = numberFormat(last) + ' $';
     const prev = state.prices[key][state.prices[key].length-2] || last;
@@ -159,8 +157,6 @@ function updateBigChart(coin){
   if(!bigChart) createBigChart();
   bigChart.data.labels = state.prices[coin].map((_,i)=>i);
   bigChart.data.datasets[0].data = state.prices[coin];
-  // add vertical line for entry if active
-  const plugins = [];
   bigChart.update('none');
 }
 
@@ -169,18 +165,17 @@ function numberFormat(n){ return (Math.round(n*1000000)/1000000).toFixed(6).repl
 
 // --- Trade logic ---
 // Open position: margin from free balance is reserved. position object stored in state.active
-function openPosition({coin, margin, leverage, side, stop, take}){
+function openPosition({coin, margin, leverage, side, take}){
   margin = Number(margin);
   leverage = Number(leverage);
   if(!coin || margin <= 0 || margin > state.free) return {ok:false, msg:'Неверная маржа'};
   const price = state.prices[coin][state.prices[coin].length-1];
-  // position size:
   const positionSize = margin * leverage; // в USD
   const quantity = positionSize / price; // количество монеты
   state.free -= margin;
   state.active = {
     coin, margin, leverage, side, entryPrice: price, positionSize, quantity,
-    stop: stop || null, take: take || null, openedAt: Date.now()
+    take: take || null, openedAt: Date.now()
   };
   saveState();
   pushHistory({type:'open', coin, side, margin, leverage, price, time:Date.now()});
@@ -192,15 +187,11 @@ function closePosition(closedBy='manual', closePrice=null){
   if(!state.active) return;
   const p = state.active;
   const price = closePrice || state.prices[p.coin][state.prices[p.coin].length-1];
-  // P&L: positionSize * ((price - entry) / entry)  -> sign depends on side
   const pnlPercent = (price - p.entryPrice) / p.entryPrice;
   const rawPL = p.positionSize * pnlPercent * (p.side === 'long' ? 1 : -1);
   const profit = Math.round(rawPL * 100) / 100;
-  // free margin returns margin + profit (if positive). If negative and exceeds margin -> liquidation handled separately.
   const marginReturn = p.margin + profit;
-  // apply
   if(marginReturn <= 0){
-    // liquidated -> balance 0
     state.balance = 0;
     state.free = 0;
   } else {
@@ -213,7 +204,6 @@ function closePosition(closedBy='manual', closePrice=null){
     coin: p.coin, side: p.side, entry: p.entryPrice, close: price, pnl: profit, margin: p.margin, leverage: p.leverage, time: Date.now()
   });
 
-  // update ranking
   updateRanking();
 
   state.active = null;
@@ -221,18 +211,11 @@ function closePosition(closedBy='manual', closePrice=null){
   renderAll();
 }
 
-function checkStopTakeAndLiquidation(){
+function checkTakeAndLiquidation(){
   if(!state.active) return;
   const p = state.active;
   const last = state.prices[p.coin][state.prices[p.coin].length-1];
 
-  // check stop
-  if(p.stop){
-    if((p.side === 'long' && last <= p.stop) || (p.side === 'short' && last >= p.stop)){
-      closePosition('stop', last);
-      return;
-    }
-  }
   // check take
   if(p.take){
     if((p.side === 'long' && last >= p.take) || (p.side === 'short' && last <= p.take)){
@@ -240,11 +223,10 @@ function checkStopTakeAndLiquidation(){
       return;
     }
   }
-  // check liquidation: compute current loss relative to margin
+  // check liquidation
   const pnlPercent = (last - p.entryPrice) / p.entryPrice;
   const rawPL = p.positionSize * pnlPercent * (p.side === 'long' ? 1 : -1);
-  const loss = -Math.min(0, rawPL); // positive loss
-  // if loss >= margin => liquidation
+  const loss = -Math.min(0, rawPL);
   if(loss >= p.margin){
     closePosition('liquidation', last);
     return;
@@ -259,9 +241,7 @@ function pushHistory(item){
 }
 
 function updateRanking(){
-  // simple ranking by balance stored locally; user is single-player so use a fake player name "You"
   const player = {name: "You", balance: state.balance, updated: Date.now()};
-  // update or push
   const idx = state.ranking.findIndex(r=>r.name===player.name);
   if(idx>=0) state.ranking[idx] = player;
   else state.ranking.push(player);
@@ -317,24 +297,22 @@ function renderActive(){
   const rawPL = p.positionSize * pnlPercent * (p.side === 'long' ? 1 : -1);
   const profit = Math.round(rawPL * 100) / 100;
   pnlBox.textContent = `${profit >=0?'+':''}${profit}$ (${(pnlPercent*100*(p.side==='long'?1:-1)).toFixed(2)}%)`;
-  // liquidation distance: compute how much price must move to wipe margin
-  // liquidation condition: loss >= margin -> -positionSize * ((liqPrice - entry)/entry) * sign = margin
-  // solve for liqPrice:
+
   let liqPrice;
   if(p.side === 'long'){
-    const frac = -p.margin / p.positionSize; // negative number
+    const frac = -p.margin / p.positionSize;
     liqPrice = p.entryPrice * (1 + frac);
     liqPrice = Math.max(0.000001, liqPrice);
   } else {
     const frac = -p.margin / p.positionSize;
-    liqPrice = p.entryPrice * (1 - frac); // for short price goes up
+    liqPrice = p.entryPrice * (1 - frac);
   }
   liqBox.textContent = `${numberFormat(liqPrice)}$`;
   activePositionDiv.innerHTML = `
     <div><strong>${p.coin}</strong> ${p.side.toUpperCase()} ${p.leverage}x</div>
     <div>Вход: ${numberFormat(p.entryPrice)}$ • Кол-во: ${numberFormat(p.quantity)}</div>
     <div>Маржа: ${p.margin}$ • Позиция: ${p.positionSize}$</div>
-    <div>Stop: ${p.stop ? numberFormat(p.stop)+'$' : '—'} • Take: ${p.take ? numberFormat(p.take)+'$' : '—'}</div>
+    <div>Take: ${p.take ? numberFormat(p.take)+'$' : '—'}</div>
     <div>Тек. цена: ${numberFormat(last)}$ • P&L: <strong>${profit>=0?'+':''}${profit}$</strong></div>
   `;
   Object.keys(COINS).forEach(c=>{
@@ -348,7 +326,6 @@ function renderAll(){
   renderHistory();
   renderRanking();
   renderActive();
-  // update big chart to selected coin
   updateBigChart(tradeCoinSel.value);
 }
 
@@ -358,11 +335,10 @@ openBtn.addEventListener('click', ()=>{
   const margin = Number(marginInput.value);
   const leverage = Number(leverageSel.value);
   const side = sideSel.value;
-  const stop = Number(stopInput.value) || null;
   const take = Number(takeInput.value) || null;
   if(margin <= 0){ alert('Укажите маржу > 0'); return;}
   if(margin > state.free){ alert('Недостаточно свободного баланса'); return;}
-  const res = openPosition({coin, margin, leverage, side, stop, take});
+  const res = openPosition({coin, margin, leverage, side, take});
   if(!res.ok) alert(res.msg || 'Ошибка');
 });
 
@@ -391,17 +367,41 @@ resetBtn.addEventListener('click', ()=>{
 // --- Main loop ---
 function mainTick(){
   tickPrices();
-  checkStopTakeAndLiquidation();
+  checkTakeAndLiquidation();
   renderAll();
+}
+
+// --- Telegram Web App integration (минимальная) ---
+let tg = null;
+function initTelegramWebApp(){
+  try {
+    if(window.Telegram && window.Telegram.WebApp){
+      tg = window.Telegram.WebApp;
+      tg.ready();
+      // Пример использования: показываем название и баланс в MainButton
+      try {
+        tg.MainButton.setText(`Баланс: ${state.balance.toFixed(2)}$`);
+        tg.MainButton.show();
+      } catch(e){}
+      // Можно реагировать на нажатие MainButton:
+      tg.onEvent('mainButtonClicked', () => {
+        // по нажатию кнопки в Telegram можно открыть вкладку рейтинга
+        document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+        document.querySelector('.tab-btn[data-tab="ranking"]').classList.add('active');
+        document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+        document.getElementById('ranking').classList.add('active');
+      });
+    }
+  } catch(e){
+    console.warn('Telegram WebApp init failed', e);
+  }
 }
 
 // --- Init ---
 function init(){
   loadState();
-  // if never set, set default balance
   if(typeof state.balance !== 'number') state.balance = DEFAULT_BALANCE;
   if(!state.prices || Object.keys(state.prices).length===0) initPrices();
-  // ensure arrays exist
   Object.keys(COINS).forEach(k=>{
     if(!state.prices[k]) state.prices[k] = Array(PRICES_HISTORY_LENGTH).fill(COINS[k].price);
   });
@@ -409,8 +409,9 @@ function init(){
   createBigChart();
   renderAll();
 
-  // start ticks
-  setInterval(mainTick, 1000); // каждую секунду обновление цен
+  initTelegramWebApp();
+
+  setInterval(mainTick, 1000);
 }
 
 init();
