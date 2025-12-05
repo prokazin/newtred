@@ -9,6 +9,8 @@
   <!-- Chart.js CDN -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
 
+  <!-- Telegram Web App JS (используется внутри Telegram) -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
 </head>
 <body>
   <div id="app">
@@ -128,7 +130,7 @@
                 </select>
               </label>
 
-              <label>Stop-loss ($, optional): <input type="number" id="stopInput" placeholder="Цена стопа"></label>
+              <!-- Убрали Stop-loss по запросу -->
               <label>Take-profit ($, optional): <input type="number" id="takeInput" placeholder="Цена тейк"></label>
 
               <div class="trade-actions">
